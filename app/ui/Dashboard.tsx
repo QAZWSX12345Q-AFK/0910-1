@@ -25,10 +25,63 @@ import {
 const STORAGE =
   "fund-dca-assistant-final-v1";
 
+type JsonpData = Record<string, string | undefined>;
+
+type WindowWithCallbacks = Window & {
+  [key: string]: unknown;
+};
+
 function today() {
   return new Date()
     .toISOString()
     .slice(0, 10);
+}
+
+/**
+ * 生成一个兼容性更好的唯一 ID。
+ * 优先使用 crypto.randomUUID，
+ * 如果浏览器不支持，则使用时间戳 + 随机数。
+ */
+function createId() {
+  try {
+    if (
+      typeof crypto !== "undefined" &&
+      typeof crypto.randomUUID === "function"
+    ) {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // ignore
+  }
+
+  return `${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+}
+
+/**
+ * 安全转换数字。
+ *
+ * 注意：
+ * 不能使用 Number(value) || null，
+ * 因为 0 会被错误地变成 null。
+ */
+function toNumberOrNull(
+  value: string | undefined
+) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return null;
+  }
+
+  const number = Number(value);
+
+  return Number.isFinite(number)
+    ? number
+    : null;
 }
 
 export default function Dashboard() {
@@ -70,6 +123,9 @@ export default function Dashboard() {
   const [buyNav, setBuyNav] =
     useState("");
 
+  /**
+   * 页面第一次加载时读取本地数据。
+   */
   useEffect(() => {
     try {
       const saved =
@@ -77,13 +133,22 @@ export default function Dashboard() {
           STORAGE
         );
 
-      if (!saved) return;
+      if (!saved) {
+        return;
+      }
 
       const data = JSON.parse(saved);
 
-      setPlans(data.plans || []);
+      setPlans(
+        Array.isArray(data.plans)
+          ? data.plans
+          : []
+      );
+
       setTransactions(
-        data.transactions || []
+        Array.isArray(data.transactions)
+          ? data.transactions
+          : []
       );
     } catch {
       console.warn(
@@ -92,19 +157,31 @@ export default function Dashboard() {
     }
   }, []);
 
+  /**
+   * 数据变化后自动保存到浏览器。
+   */
   useEffect(() => {
-    localStorage.setItem(
-      STORAGE,
-      JSON.stringify({
-        plans,
-        transactions,
-      })
-    );
+    try {
+      localStorage.setItem(
+        STORAGE,
+        JSON.stringify({
+          plans,
+          transactions,
+        })
+      );
+    } catch {
+      console.warn(
+        "无法保存本地数据"
+      );
+    }
   }, [
     plans,
     transactions,
   ]);
 
+  /**
+   * 当前所有涉及的基金代码。
+   */
   const codes = useMemo(() => {
     return Array.from(
       new Set([
@@ -115,129 +192,217 @@ export default function Dashboard() {
           (item) => item.code
         ),
       ])
-    );
+    ).filter(Boolean);
   }, [
     plans,
     transactions,
   ]);
 
+  /**
+   * 基金代码变化时自动加载行情。
+   */
   useEffect(() => {
-    if (!codes.length) return;
+    if (!codes.length) {
+      return;
+    }
 
     loadQuotes(codes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [codes.join(",")]);
 
+  /**
+   * 使用公开基金估值接口获取行情。
+   *
+   * 这里使用 JSONP，是因为 GitHub Pages 是纯静态网站，
+   * 浏览器无法直接运行 Next.js server API。
+   */
   function loadQuotes(
     fundCodes: string[]
   ) {
+    if (!fundCodes.length) {
+      return;
+    }
+
     setLoading(true);
 
     let completed = 0;
+    let finished = false;
 
-    fundCodes.forEach((fundCode) => {
-      const callback =
-        `fundCallback_${Date.now()}_${Math.random()
-          .toString(36)
-          .slice(2)}`;
+    const scripts: HTMLScriptElement[] =
+      [];
 
-      const script =
-        document.createElement(
-          "script"
-        );
+    const finishOne = () => {
+      completed += 1;
 
-      (
-        window as unknown as Record<
-          string,
-          (data: Record<string, string>) => void
-        >
-      )[callback] = (data) => {
-        const quote: FundQuote = {
-          code:
-            data.fundcode ||
-            fundCode,
+      if (
+        completed >= fundCodes.length &&
+        !finished
+      ) {
+        finished = true;
+        setLoading(false);
+      }
+    };
 
-          name:
-            data.name ||
-            `基金 ${fundCode}`,
+    fundCodes.forEach(
+      (fundCode) => {
+        const callback =
+          `fundCallback_${Date.now()}_${Math.random()
+            .toString(36)
+            .slice(2)}`;
 
-          nav:
-            Number(data.dwjz) || 0,
+        const script =
+          document.createElement(
+            "script"
+          );
 
-          navDate:
-            data.jzrq || "",
+        scripts.push(script);
 
-          estimatedNav:
-            Number(data.gsz) ||
-            null,
+        let timeoutId:
+          | ReturnType<typeof setTimeout>
+          | undefined;
 
-          estimatedChangePct:
-            Number(data.gszzl) ||
-            null,
+        let handled = false;
 
-          estimatedAt:
-            data.gztime || null,
+        const cleanup = () => {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+
+          script.remove();
+
+          try {
+            delete (
+              window as WindowWithCallbacks
+            )[callback];
+          } catch {
+            // ignore
+          }
         };
 
-        setQuotes((current) => ({
-          ...current,
-          [fundCode]: quote,
-        }));
+        const handleFinish = () => {
+          if (handled) {
+            return;
+          }
 
-        delete (
-          window as unknown as Record<
-            string,
-            unknown
-          >
-        )[callback];
+          handled = true;
+          cleanup();
+          finishOne();
+        };
 
-        script.remove();
+        (
+          window as WindowWithCallbacks
+        )[callback] = (
+          data: JsonpData
+        ) => {
+          if (handled) {
+            return;
+          }
 
-        completed += 1;
+          const nav =
+            toNumberOrNull(
+              data?.dwjz
+            );
 
-        if (
-          completed ===
-          fundCodes.length
-        ) {
-          setLoading(false);
-        }
-      };
+          const estimatedNav =
+            toNumberOrNull(
+              data?.gsz
+            );
 
-      script.src =
-        `https://fundgz.1234567.com.cn/js/${fundCode}.js?rt=${Date.now()}&callback=${callback}`;
+          const estimatedChangePct =
+            toNumberOrNull(
+              data?.gszzl
+            );
 
-      script.onerror = () => {
-        script.remove();
+          const quote: FundQuote = {
+            code:
+              data?.fundcode ||
+              fundCode,
 
-        completed += 1;
+            name:
+              data?.name ||
+              `基金 ${fundCode}`,
 
-        if (
-          completed ===
-          fundCodes.length
-        ) {
-          setLoading(false);
-        }
-      };
+            nav:
+              nav ?? 0,
 
-      document.body.appendChild(
-        script
-      );
-    });
+            navDate:
+              data?.jzrq ||
+              "",
+
+            estimatedNav,
+
+            estimatedChangePct,
+
+            estimatedAt:
+              data?.gztime ||
+              null,
+          };
+
+          setQuotes(
+            (current) => ({
+              ...current,
+              [fundCode]: quote,
+            })
+          );
+
+          handleFinish();
+        };
+
+        script.src =
+          `https://fundgz.1234567.com.cn/js/${fundCode}.js?rt=${Date.now()}&callback=${callback}`;
+
+        script.async = true;
+
+        script.onerror = () => {
+          handleFinish();
+        };
+
+        /**
+         * 8 秒超时。
+         * 防止某个基金接口没有响应导致整个页面
+         * 永远停留在“刷新中”。
+         */
+        timeoutId = setTimeout(() => {
+          handleFinish();
+        }, 8000);
+
+        document.body.appendChild(
+          script
+        );
+      }
+    );
   }
 
+  /**
+   * 计算组合数据。
+   */
   const stats =
     portfolioStats(
       transactions,
       quotes
     );
 
+  /**
+   * 计算资产走势。
+   */
   const snapshots =
     buildSnapshots(
       transactions,
       quotes
     );
 
+  /**
+   * 添加定投计划。
+   */
   function addPlan() {
-    if (!/^\d{6}$/.test(code)) {
+    const normalizedCode =
+      code.trim();
+
+    if (
+      !/^\d{6}$/.test(
+        normalizedCode
+      )
+    ) {
       alert(
         "请输入 6 位基金代码"
       );
@@ -259,29 +424,56 @@ export default function Dashboard() {
       return;
     }
 
+    if (!startDate) {
+      alert(
+        "请选择开始日期"
+      );
+      return;
+    }
+
     const plan: DcaPlan = {
-      id: crypto.randomUUID(),
+      id: createId(),
+
       name:
         name.trim() ||
-        `基金 ${code}`,
-      code,
-      amount: numericAmount,
+        `基金 ${normalizedCode}`,
+
+      code:
+        normalizedCode,
+
+      amount:
+        numericAmount,
+
       frequency,
+
       startDate,
+
       enabled: true,
     };
 
-    setPlans((current) => [
-      plan,
-      ...current,
-    ]);
+    setPlans(
+      (current) => [
+        plan,
+        ...current,
+      ]
+    );
 
     setCode("");
     setName("");
   }
 
+  /**
+   * 手动记录一次实际买入。
+   */
   function addBuy() {
-    if (!/^\d{6}$/.test(buyCode)) {
+    const normalizedCode =
+      buyCode.trim();
+
+    if (
+      !/^\d{6}$/.test(
+        normalizedCode
+      )
+    ) {
       alert(
         "请输入 6 位基金代码"
       );
@@ -295,7 +487,13 @@ export default function Dashboard() {
       Number(buyNav);
 
     if (
+      !Number.isFinite(
+        numericAmount
+      ) ||
       numericAmount <= 0 ||
+      !Number.isFinite(
+        numericNav
+      ) ||
       numericNav <= 0
     ) {
       alert(
@@ -305,15 +503,21 @@ export default function Dashboard() {
     }
 
     const quote =
-      quotes[buyCode];
+      quotes[
+        normalizedCode
+      ];
 
     const transaction =
       createTransaction(
-        buyCode,
+        normalizedCode,
+
         quote?.name ||
-          `基金 ${buyCode}`,
+          `基金 ${normalizedCode}`,
+
         today(),
+
         numericAmount,
+
         numericNav
       );
 
@@ -328,6 +532,9 @@ export default function Dashboard() {
     setBuyNav("");
   }
 
+  /**
+   * 按当前估值执行一次定投。
+   */
   function addEstimatedTransaction(
     plan: DcaPlan
   ) {
@@ -345,7 +552,10 @@ export default function Dashboard() {
       quote.estimatedNav ??
       quote.nav;
 
-    if (!nav) {
+    if (
+      !Number.isFinite(nav) ||
+      nav <= 0
+    ) {
       alert(
         "当前没有有效净值。"
       );
@@ -355,10 +565,16 @@ export default function Dashboard() {
     const transaction =
       createTransaction(
         plan.code,
-        plan.name,
+
+        quote.name ||
+          plan.name,
+
         today(),
+
         plan.amount,
+
         nav,
+
         plan.id
       );
 
@@ -370,6 +586,11 @@ export default function Dashboard() {
     );
   }
 
+  /**
+   * 删除定投计划。
+   *
+   * 注意：只删除计划，不删除历史交易。
+   */
   function deletePlan(
     id: string
   ) {
@@ -381,14 +602,18 @@ export default function Dashboard() {
       return;
     }
 
-    setPlans((current) =>
-      current.filter(
-        (item) =>
-          item.id !== id
-      )
+    setPlans(
+      (current) =>
+        current.filter(
+          (item) =>
+            item.id !== id
+        )
     );
   }
 
+  /**
+   * 清空所有本地数据。
+   */
   function clearAll() {
     if (
       !confirm(
@@ -402,9 +627,13 @@ export default function Dashboard() {
     setTransactions([]);
     setQuotes({});
 
-    localStorage.removeItem(
-      STORAGE
-    );
+    try {
+      localStorage.removeItem(
+        STORAGE
+      );
+    } catch {
+      // ignore
+    }
   }
 
   return (
@@ -439,6 +668,8 @@ export default function Dashboard() {
             : "刷新基金数据"}
         </button>
       </header>
+
+      {/* ==================== 资产统计 ==================== */}
 
       <section className="stats">
         <Stat
@@ -481,14 +712,17 @@ export default function Dashboard() {
             stats.todayEstimate
           )}
           positive={
-            stats.todayEstimate >=
-            0
+            stats.todayEstimate >= 0
           }
           note="盘中估值，仅供参考"
         />
       </section>
 
+      {/* ==================== 新增区域 ==================== */}
+
       <section className="grid two">
+        {/* 新增定投计划 */}
+
         <div className="panel">
           <div className="panelTitle">
             新增定投计划
@@ -499,7 +733,10 @@ export default function Dashboard() {
               value={code}
               onChange={(e) =>
                 setCode(
-                  e.target.value
+                  e.target.value.replace(
+                    /\D/g,
+                    ""
+                  )
                 )
               }
               placeholder="基金代码，例如 000001"
@@ -568,6 +805,8 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* 记录实际买入 */}
+
         <div className="panel">
           <div className="panelTitle">
             记录实际买入
@@ -578,7 +817,10 @@ export default function Dashboard() {
               value={buyCode}
               onChange={(e) =>
                 setBuyCode(
-                  e.target.value
+                  e.target.value.replace(
+                    /\D/g,
+                    ""
+                  )
                 )
               }
               placeholder="基金代码"
@@ -623,6 +865,8 @@ export default function Dashboard() {
         </div>
       </section>
 
+      {/* ==================== 定投计划 ==================== */}
+
       <section className="panel">
         <div className="panelHead">
           <div>
@@ -658,7 +902,10 @@ export default function Dashboard() {
 
                 const invested =
                   list.reduce(
-                    (sum, item) =>
+                    (
+                      sum,
+                      item
+                    ) =>
                       sum +
                       item.amount +
                       item.fee,
@@ -667,7 +914,10 @@ export default function Dashboard() {
 
                 const shares =
                   list.reduce(
-                    (sum, item) =>
+                    (
+                      sum,
+                      item
+                    ) =>
                       sum +
                       item.shares,
                     0
@@ -688,9 +938,7 @@ export default function Dashboard() {
                 return (
                   <div
                     className="row"
-                    key={
-                      plan.id
-                    }
+                    key={plan.id}
                   >
                     <div>
                       <strong>
@@ -701,7 +949,8 @@ export default function Dashboard() {
                         {plan.code} ·{" "}
                         {frequencyLabel(
                           plan.frequency
-                        )} · ¥
+                        )}{" "}
+                        · ¥
                         {plan.amount}
                       </span>
                     </div>
@@ -737,8 +986,7 @@ export default function Dashboard() {
 
                       <strong
                         className={
-                          profit >=
-                          0
+                          profit >= 0
                             ? "up"
                             : "down"
                         }
@@ -779,6 +1027,8 @@ export default function Dashboard() {
         )}
       </section>
 
+      {/* ==================== 基金行情 ==================== */}
+
       <section className="panel">
         <div className="panelHead">
           <div>
@@ -805,12 +1055,25 @@ export default function Dashboard() {
                     fundCode
                   ];
 
+                /**
+                 * quote 可能还没有加载完成。
+                 *
+                 * 所有字段都使用 ?. 或 ??，
+                 * 防止 undefined 导致页面崩溃。
+                 */
+
+                const displayNav =
+                  quote?.estimatedNav ??
+                  quote?.nav ??
+                  null;
+
+                const changePct =
+                  quote?.estimatedChangePct;
+
                 return (
                   <div
                     className="quote"
-                    key={
-                      fundCode
-                    }
+                    key={fundCode}
                   >
                     <strong>
                       {quote?.name ||
@@ -822,11 +1085,12 @@ export default function Dashboard() {
                     </span>
 
                     <b>
-                      {quote
-                        ? (
-                            quote.estimatedNav ??
-                            quote.nav
-                          ).toFixed(
+                      {displayNav !==
+                        null &&
+                      Number.isFinite(
+                        displayNav
+                      )
+                        ? displayNav.toFixed(
                             4
                           )
                         : "加载中"}
@@ -835,22 +1099,22 @@ export default function Dashboard() {
                     <em
                       className={
                         (
-                          quote?.estimatedChangePct ??
+                          changePct ??
                           0
                         ) >= 0
                           ? "up"
                           : "down"
                       }
                     >
-                      {quote?.estimatedChangePct ===
+                      {changePct ==
                       null
                         ? "暂无估值"
                         : `${
-                            quote.estimatedChangePct >=
+                            changePct >=
                             0
                               ? "+"
                               : ""
-                          }${quote.estimatedChangePct.toFixed(
+                          }${changePct.toFixed(
                             2
                           )}%`}
                     </em>
@@ -860,6 +1124,15 @@ export default function Dashboard() {
                       {quote?.navDate ||
                         "--"}
                     </small>
+
+                    {quote?.estimatedAt && (
+                      <small>
+                        估值时间：
+                        {
+                          quote.estimatedAt
+                        }
+                      </small>
+                    )}
                   </div>
                 );
               }
@@ -867,6 +1140,8 @@ export default function Dashboard() {
           </div>
         )}
       </section>
+
+      {/* ==================== 资产走势 ==================== */}
 
       <section className="panel">
         <div className="panelHead">
@@ -898,9 +1173,7 @@ export default function Dashboard() {
                   const max =
                     Math.max(
                       ...snapshots.map(
-                        (
-                          item
-                        ) =>
+                        (item) =>
                           item.value
                       ),
                       1
@@ -942,6 +1215,8 @@ export default function Dashboard() {
         )}
       </section>
 
+      {/* ==================== 数据管理 ==================== */}
+
       <section className="panel dangerPanel">
         <div className="panelHead">
           <div>
@@ -977,6 +1252,8 @@ export default function Dashboard() {
     </main>
   );
 }
+
+/* ==================== 统计卡片 ==================== */
 
 function Stat({
   title,
