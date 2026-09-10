@@ -1,0 +1,10 @@
+{
+  "name": "基金定投助手",
+  "short_name": "定投助手",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07111f",
+  "theme_color": "#0f172a",
+  "lang": "zh-CN",
+  "icons": []
+}
