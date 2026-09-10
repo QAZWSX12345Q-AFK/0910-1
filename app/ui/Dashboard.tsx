@@ -1,43 +1,24 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import {
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
-
-import {
+  buildSnapshots,
   createTransaction,
   frequencyLabel,
   money,
   percent,
   portfolioStats,
-  buildSnapshots,
 } from "../../lib/calculator";
-
 import {
   DcaPlan,
   FundQuote,
-  Frequency,
   Transaction,
 } from "../../lib/types";
 
-const STORAGE =
-  "fund-dca-assistant-final-v1";
-
 type JsonpData = Record<string, string | undefined>;
 
-function today() {
-  return new Date()
-    .toISOString()
-    .slice(0, 10);
-}
+const STORAGE_KEY = "fund-dca-assistant-final-v2";
 
-/**
- * 生成唯一 ID。
- * 优先使用 crypto.randomUUID，
- * 不支持时使用时间戳 + 随机字符串。
- */
 function createId() {
   try {
     if (
@@ -50,538 +31,431 @@ function createId() {
     // ignore
   }
 
-  return `${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2)}`;
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-/**
- * 安全转换数字。
- *
- * 不使用 Number(value) || null，
- * 因为 0 会被错误转换成 null。
- */
-function toNumberOrNull(
-  value: string | undefined
-) {
-  if (
-    value === undefined ||
-    value === null ||
-    value === ""
-  ) {
+function toNumberOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
     return null;
   }
 
   const number = Number(value);
 
-  return Number.isFinite(number)
-    ? number
-    : null;
+  return Number.isFinite(number) ? number : null;
+}
+
+function todayString() {
+  const date = new Date();
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
 }
 
 export default function Dashboard() {
-  const [plans, setPlans] =
-    useState<DcaPlan[]>([]);
+  const [plans, setPlans] = useState<DcaPlan[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [quotes, setQuotes] = useState<Record<string, FundQuote>>({});
 
-  const [transactions, setTransactions] =
-    useState<Transaction[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  const [quotes, setQuotes] =
-    useState<Record<string, FundQuote>>(
-      {}
-    );
+  // 新增定投计划
+  const [planName, setPlanName] = useState("我的定投");
+  const [planCode, setPlanCode] = useState("000001");
+  const [planAmount, setPlanAmount] = useState("100");
+  const [planFrequency, setPlanFrequency] =
+    useState<DcaPlan["frequency"]>("weekly");
 
-  const [loading, setLoading] =
-    useState(false);
+  // 手动买入
+  const [buyCode, setBuyCode] = useState("000001");
+  const [buyName, setBuyName] = useState("");
+  const [buyAmount, setBuyAmount] = useState("100");
+  const [buyNav, setBuyNav] = useState("");
 
-  const [code, setCode] =
-    useState("");
-
-  const [name, setName] =
-    useState("");
-
-  const [amount, setAmount] =
-    useState("500");
-
-  const [frequency, setFrequency] =
-    useState<Frequency>("weekly");
-
-  const [startDate, setStartDate] =
-    useState(today());
-
-  const [buyCode, setBuyCode] =
-    useState("");
-
-  const [buyAmount, setBuyAmount] =
-    useState("500");
-
-  const [buyNav, setBuyNav] =
-    useState("");
-
-  /* =========================
-     读取本地数据
-     ========================= */
-
+  // -----------------------------
+  // 从 localStorage 读取
+  // -----------------------------
   useEffect(() => {
     try {
-      const saved =
-        localStorage.getItem(
-          STORAGE
-        );
+      const raw = localStorage.getItem(STORAGE_KEY);
 
-      if (!saved) {
-        return;
+      if (raw) {
+        const data = JSON.parse(raw);
+
+        if (Array.isArray(data.plans)) {
+          setPlans(data.plans);
+        }
+
+        if (Array.isArray(data.transactions)) {
+          setTransactions(data.transactions);
+        }
       }
-
-      const data = JSON.parse(saved);
-
-      setPlans(
-        Array.isArray(data.plans)
-          ? data.plans
-          : []
-      );
-
-      setTransactions(
-        Array.isArray(data.transactions)
-          ? data.transactions
-          : []
-      );
-    } catch {
-      console.warn(
-        "无法读取本地数据"
-      );
+    } catch (error) {
+      console.error("读取本地数据失败:", error);
+    } finally {
+      setLoaded(true);
     }
   }, []);
 
-  /* =========================
-     自动保存本地数据
-     ========================= */
-
+  // -----------------------------
+  // 保存到 localStorage
+  // -----------------------------
   useEffect(() => {
+    if (!loaded) {
+      return;
+    }
+
     try {
       localStorage.setItem(
-        STORAGE,
+        STORAGE_KEY,
         JSON.stringify({
           plans,
           transactions,
         })
       );
-    } catch {
-      console.warn(
-        "无法保存本地数据"
-      );
+    } catch (error) {
+      console.error("保存本地数据失败:", error);
     }
-  }, [
-    plans,
-    transactions,
-  ]);
+  }, [plans, transactions, loaded]);
 
-  /* =========================
-     获取基金代码
-     ========================= */
-
+  // -----------------------------
+  // 当前所有基金代码
+  // -----------------------------
   const codes = useMemo(() => {
-    return Array.from(
-      new Set([
-        ...plans.map(
-          (item) => item.code
-        ),
-        ...transactions.map(
-          (item) => item.code
-        ),
-      ])
-    ).filter(Boolean);
-  }, [
-    plans,
-    transactions,
-  ]);
+    const set = new Set<string>();
 
-  /* =========================
-     基金代码变化时自动刷新
-     ========================= */
+    plans.forEach((plan) => {
+      if (plan.code) {
+        set.add(plan.code);
+      }
+    });
 
-  useEffect(() => {
-    if (!codes.length) {
-      return;
-    }
+    transactions.forEach((transaction) => {
+      if (transaction.code) {
+        set.add(transaction.code);
+      }
+    });
 
-    loadQuotes(codes);
+    return Array.from(set);
+  }, [plans, transactions]);
 
-    // codes.join(",") 用来避免数组引用变化造成重复请求
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [codes.join(",")]);
-
-  /* =========================
-     加载基金行情
-     ========================= */
-
-  function loadQuotes(
-    fundCodes: string[]
-  ) {
+  // -----------------------------
+  // 天天基金 JSONP 获取基金数据
+  //
+  // 接口实际返回：
+  // jsonpgz({...});
+  //
+  // 因此不能使用 callback=xxx
+  // -----------------------------
+  function loadQuotes(fundCodes: string[]) {
     if (!fundCodes.length) {
+      setLoading(false);
       return;
     }
 
     setLoading(true);
 
-    let completed = 0;
-    let finished = false;
+    let index = 0;
 
-    const finishOne = () => {
-      completed += 1;
-
-      if (
-        completed >= fundCodes.length &&
-        !finished
-      ) {
-        finished = true;
+    const loadNext = () => {
+      if (index >= fundCodes.length) {
         setLoading(false);
+        return;
       }
-    };
 
-    fundCodes.forEach(
-      (fundCode) => {
-        const callback =
-          `fundCallback_${Date.now()}_${Math.random()
-            .toString(36)
-            .slice(2)}`;
+      const fundCode = fundCodes[index];
 
-        const script =
-          document.createElement(
-            "script"
-          );
+      const script = document.createElement("script");
 
-        let timeoutId:
-          | ReturnType<typeof setTimeout>
-          | undefined;
+      let finished = false;
 
-        let handled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-        /* -------------------------
-           清理 JSONP
-           ------------------------- */
-
-        const cleanup = () => {
-          if (timeoutId) {
-            clearTimeout(timeoutId);
-          }
-
+      const cleanup = () => {
+        try {
           script.remove();
+        } catch {
+          // ignore
+        }
 
-          try {
-            /**
-             * 这里使用 unknown 双重转换，
-             * 避免 TypeScript 报：
-             *
-             * Conversion of type 'Window'
-             * to type 'WindowWithCallbacks'
-             * may be a mistake
-             */
-            const win =
-              window as unknown as Record<
-                string,
-                unknown
-              >;
+        try {
+          const win =
+            window as unknown as Record<string, unknown>;
 
-            delete win[callback];
-          } catch {
-            // ignore
-          }
-        };
+          delete win.jsonpgz;
+        } catch {
+          // ignore
+        }
 
-        /* -------------------------
-           完成一次请求
-           ------------------------- */
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+      };
 
-        const handleFinish = () => {
-          if (handled) {
-            return;
-          }
+      const finish = () => {
+        if (finished) {
+          return;
+        }
 
-          handled = true;
+        finished = true;
 
-          cleanup();
+        cleanup();
 
-          finishOne();
-        };
+        index += 1;
 
-        /* -------------------------
-           JSONP 回调
-           ------------------------- */
+        loadNext();
+      };
 
+      try {
         const win =
           window as unknown as Record<
             string,
             unknown
           >;
 
-        win[callback] = (
-          data: JsonpData
-        ) => {
-          if (handled) {
+        /*
+         * 天天基金接口固定调用：
+         *
+         * jsonpgz({...});
+         *
+         * 所以必须把 jsonpgz 挂到 window 上。
+         */
+        win.jsonpgz = (data: JsonpData) => {
+          if (finished) {
             return;
           }
 
-          const nav =
-            toNumberOrNull(
-              data?.dwjz
-            );
+          const nav = toNumberOrNull(data?.dwjz);
 
           const estimatedNav =
-            toNumberOrNull(
-              data?.gsz
-            );
+            toNumberOrNull(data?.gsz);
 
           const estimatedChangePct =
-            toNumberOrNull(
-              data?.gszzl
-            );
+            toNumberOrNull(data?.gszzl);
 
           const quote: FundQuote = {
-            code:
-              data?.fundcode ||
-              fundCode,
+            code: data?.fundcode || fundCode,
 
             name:
               data?.name ||
               `基金 ${fundCode}`,
 
-            nav:
-              nav ?? 0,
+            nav: nav ?? 0,
 
             navDate:
-              data?.jzrq ||
-              "",
+              data?.jzrq || "",
 
             estimatedNav,
 
             estimatedChangePct,
 
             estimatedAt:
-              data?.gztime ||
-              null,
+              data?.gztime || null,
           };
 
-          setQuotes(
-            (current) => ({
-              ...current,
-              [fundCode]: quote,
-            })
-          );
+          setQuotes((current) => ({
+            ...current,
+            [fundCode]: quote,
+          }));
 
-          handleFinish();
+          finish();
         };
-
-        /* -------------------------
-           JSONP 地址
-           ------------------------- */
-
-        script.src =
-          `https://fundgz.1234567.com.cn/js/${fundCode}.js?rt=${Date.now()}&callback=${callback}`;
-
-        script.async = true;
-
-        /* -------------------------
-           请求失败
-           ------------------------- */
-
-        script.onerror = () => {
-          handleFinish();
-        };
-
-        /* -------------------------
-           8 秒超时
-           ------------------------- */
-
-        timeoutId =
-          setTimeout(() => {
-            handleFinish();
-          }, 8000);
-
-        document.body.appendChild(
-          script
+      } catch (error) {
+        console.error(
+          `基金 ${fundCode} JSONP 初始化失败:`,
+          error
         );
+
+        finish();
+
+        return;
       }
-    );
+
+      /*
+       * 注意：
+       * 这里不能再加 callback=xxx
+       *
+       * 接口：
+       * https://fundgz.1234567.com.cn/js/000001.js
+       */
+      script.src =
+        `https://fundgz.1234567.com.cn/js/${fundCode}.js?rt=${Date.now()}`;
+
+      script.async = true;
+
+      script.onerror = () => {
+        console.warn(
+          `基金 ${fundCode} 数据获取失败`
+        );
+
+        finish();
+      };
+
+      timeoutId = setTimeout(() => {
+        console.warn(
+          `基金 ${fundCode} 数据获取超时`
+        );
+
+        finish();
+      }, 8000);
+
+      document.body.appendChild(script);
+    };
+
+    loadNext();
   }
 
-  /* =========================
-     资产统计
-     ========================= */
+  // -----------------------------
+  // 自动加载基金数据
+  // -----------------------------
+  useEffect(() => {
+    if (!loaded) {
+      return;
+    }
 
-  const stats =
-    portfolioStats(
+    if (!codes.length) {
+      return;
+    }
+
+    loadQuotes(codes);
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, codes.join(",")]);
+
+  // -----------------------------
+  // 组合统计
+  // -----------------------------
+  const stats = useMemo(() => {
+    return portfolioStats(
       transactions,
       quotes
     );
+  }, [transactions, quotes]);
 
-  /* =========================
-     资产走势
-     ========================= */
-
-  const snapshots =
-    buildSnapshots(
+  // -----------------------------
+  // 历史快照
+  // -----------------------------
+  const snapshots = useMemo(() => {
+    return buildSnapshots(
       transactions,
       quotes
     );
+  }, [transactions, quotes]);
 
-  /* =========================
-     新增定投计划
-     ========================= */
-
+  // -----------------------------
+  // 添加定投计划
+  // -----------------------------
   function addPlan() {
-    const normalizedCode =
-      code.trim();
+    const code = planCode.trim();
 
-    if (
-      !/^\d{6}$/.test(
-        normalizedCode
-      )
-    ) {
-      alert(
-        "请输入 6 位基金代码"
-      );
+    const amount = Number(planAmount);
+
+    if (!/^\d{6}$/.test(code)) {
+      alert("基金代码必须是 6 位数字");
       return;
     }
 
-    const numericAmount =
-      Number(amount);
-
-    if (
-      !Number.isFinite(
-        numericAmount
-      ) ||
-      numericAmount <= 0
-    ) {
-      alert(
-        "请输入有效定投金额"
-      );
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert("请输入正确的定投金额");
       return;
     }
 
-    if (!startDate) {
-      alert(
-        "请选择开始日期"
-      );
-      return;
-    }
-
-    const plan: DcaPlan = {
+    const newPlan: DcaPlan = {
       id: createId(),
-
       name:
-        name.trim() ||
-        `基金 ${normalizedCode}`,
+        planName.trim() ||
+        `基金 ${code}`,
 
-      code:
-        normalizedCode,
+      code,
 
-      amount:
-        numericAmount,
+      amount,
 
-      frequency,
+      frequency: planFrequency,
 
-      startDate,
+      startDate: todayString(),
 
       enabled: true,
     };
 
-    setPlans(
-      (current) => [
-        plan,
-        ...current,
-      ]
-    );
+    setPlans((current) => [
+      ...current,
+      newPlan,
+    ]);
 
-    setCode("");
-    setName("");
+    setPlanCode(code);
+
+    // 自动刷新
+    loadQuotes([code]);
   }
 
-  /* =========================
-     记录实际买入
-     ========================= */
-
+  // -----------------------------
+  // 手动买入
+  // -----------------------------
   function addBuy() {
-    const normalizedCode =
-      buyCode.trim();
+    const code = buyCode.trim();
 
-    if (
-      !/^\d{6}$/.test(
-        normalizedCode
-      )
-    ) {
-      alert(
-        "请输入 6 位基金代码"
-      );
+    const amount = Number(buyAmount);
+
+    const nav = Number(buyNav);
+
+    if (!/^\d{6}$/.test(code)) {
+      alert("基金代码必须是 6 位数字");
       return;
     }
 
-    const numericAmount =
-      Number(buyAmount);
-
-    const numericNav =
-      Number(buyNav);
-
-    if (
-      !Number.isFinite(
-        numericAmount
-      ) ||
-      numericAmount <= 0 ||
-      !Number.isFinite(
-        numericNav
-      ) ||
-      numericNav <= 0
-    ) {
-      alert(
-        "请输入有效金额和净值"
-      );
+    if (!Number.isFinite(amount) || amount <= 0) {
+      alert("请输入正确的买入金额");
       return;
     }
 
-    const quote =
-      quotes[
-        normalizedCode
-      ];
+    if (!Number.isFinite(nav) || nav <= 0) {
+      alert("请输入正确的基金净值");
+      return;
+    }
 
-    const transaction =
-      createTransaction(
-        normalizedCode,
+    const quote = quotes[code];
 
-        quote?.name ||
-          `基金 ${normalizedCode}`,
+    const name =
+      buyName.trim() ||
+      quote?.name ||
+      `基金 ${code}`;
 
-        today(),
-
-        numericAmount,
-
-        numericNav
-      );
-
-    setTransactions(
-      (current) => [
-        transaction,
-        ...current,
-      ]
+    const transaction = createTransaction(
+      code,
+      name,
+      todayString(),
+      amount,
+      nav
     );
 
-    setBuyCode("");
+    setTransactions((current) => [
+      ...current,
+      transaction,
+    ]);
+
+    setBuyName("");
+
     setBuyNav("");
+
+    loadQuotes([code]);
   }
 
-  /* =========================
-     执行一次定投
-     ========================= */
-
-  function addEstimatedTransaction(
-    plan: DcaPlan
-  ) {
-    const quote =
-      quotes[plan.code];
+  // -----------------------------
+  // 执行一次定投
+  // -----------------------------
+  function executePlan(plan: DcaPlan) {
+    const quote = quotes[plan.code];
 
     if (!quote) {
       alert(
-        "还没有获取到基金数据，请先刷新基金数据。"
+        "暂时没有获取到基金数据，请稍后再试。"
       );
+
+      loadQuotes([plan.code]);
+
       return;
     }
 
@@ -589,702 +463,775 @@ export default function Dashboard() {
       quote.estimatedNav ??
       quote.nav;
 
-    if (
-      !Number.isFinite(nav) ||
-      nav <= 0
-    ) {
-      alert(
-        "当前没有有效净值。"
-      );
+    if (!nav || nav <= 0) {
+      alert("当前基金净值无效");
       return;
     }
 
-    const transaction =
-      createTransaction(
-        plan.code,
-
-        quote.name ||
-          plan.name,
-
-        today(),
-
-        plan.amount,
-
-        nav,
-
-        plan.id
-      );
-
-    setTransactions(
-      (current) => [
-        transaction,
-        ...current,
-      ]
+    const transaction = createTransaction(
+      plan.code,
+      quote.name,
+      todayString(),
+      plan.amount,
+      nav,
+      plan.id
     );
+
+    setTransactions((current) => [
+      ...current,
+      transaction,
+    ]);
   }
 
-  /* =========================
-     删除定投计划
-     ========================= */
-
-  function deletePlan(
-    id: string
-  ) {
+  // -----------------------------
+  // 删除计划
+  // -----------------------------
+  function deletePlan(id: string) {
     if (
-      !confirm(
-        "只删除定投计划，不删除历史交易记录，确定吗？"
+      !window.confirm(
+        "确定删除这个定投计划吗？"
       )
     ) {
       return;
     }
 
-    setPlans(
-      (current) =>
-        current.filter(
-          (item) =>
-            item.id !== id
-        )
+    setPlans((current) =>
+      current.filter(
+        (item) => item.id !== id
+      )
     );
   }
 
-  /* =========================
-     清空数据
-     ========================= */
-
+  // -----------------------------
+  // 删除全部数据
+  // -----------------------------
   function clearAll() {
     if (
-      !confirm(
-        "确定删除全部本地数据吗？此操作不可恢复。"
+      !window.confirm(
+        "确定删除所有定投计划、交易记录和本地数据吗？"
       )
     ) {
       return;
     }
 
     setPlans([]);
+
     setTransactions([]);
+
     setQuotes({});
 
     try {
       localStorage.removeItem(
-        STORAGE
+        STORAGE_KEY
       );
     } catch {
       // ignore
     }
   }
 
+  // -----------------------------
+  // 刷新基金数据
+  // -----------------------------
+  function refreshQuotes() {
+    if (!codes.length) {
+      alert(
+        "目前还没有基金，请先添加一个定投计划或买入记录。"
+      );
+
+      return;
+    }
+
+    loadQuotes(codes);
+  }
+
+  // -----------------------------
+  // 添加计划时自动填充基金名称
+  // -----------------------------
+  function fillBuyFromQuote() {
+    const quote = quotes[buyCode.trim()];
+
+    if (!quote) {
+      loadQuotes([buyCode.trim()]);
+      return;
+    }
+
+    setBuyName(quote.name);
+
+    if (
+      quote.estimatedNav &&
+      quote.estimatedNav > 0
+    ) {
+      setBuyNav(
+        quote.estimatedNav.toFixed(4)
+      );
+    } else if (quote.nav > 0) {
+      setBuyNav(
+        quote.nav.toFixed(4)
+      );
+    }
+  }
+
+  // -----------------------------
+  // 页面
+  // -----------------------------
   return (
     <main className="page">
+      <div className="container">
+        {/* 顶部 */}
+        <header className="header">
+          <div>
+            <div className="eyebrow">
+              FUND DCA ASSISTANT
+            </div>
 
-      {/* =========================
-          顶部
-          ========================= */}
+            <h1>
+              基金定投助手
+            </h1>
 
-      <header className="topbar">
-        <div>
-          <div className="eyebrow">
-            FUND DCA ASSISTANT
+            <p className="subtitle">
+              定投 · 持仓 · 收益 · 实时估值
+            </p>
           </div>
 
-          <h1>
-            基金定投助手
-          </h1>
+          <button
+            className="secondaryButton"
+            onClick={refreshQuotes}
+            disabled={loading}
+          >
+            {loading
+              ? "正在刷新..."
+              : "刷新基金数据"}
+          </button>
+        </header>
 
-          <p>
-            定投 · 持仓 · 收益 · 资产管理
-          </p>
+        {/* 总览 */}
+        <section className="statsGrid">
+          <div className="statCard">
+            <div className="statLabel">
+              总资产
+            </div>
+
+            <div className="statValue">
+              {money(stats.value)}
+            </div>
+
+            <div className="statHint">
+              当前估值
+            </div>
+          </div>
+
+          <div className="statCard">
+            <div className="statLabel">
+              累计投入
+            </div>
+
+            <div className="statValue">
+              {money(stats.invested)}
+            </div>
+
+            <div className="statHint">
+              定投 + 手动买入
+            </div>
+          </div>
+
+          <div className="statCard">
+            <div className="statLabel">
+              累计收益
+            </div>
+
+            <div
+              className={
+                stats.profit >= 0
+                  ? "statValue profit"
+                  : "statValue loss"
+              }
+            >
+              {money(stats.profit)}
+            </div>
+
+            <div className="statHint">
+              收益率{" "}
+              {percent(stats.rate)}
+            </div>
+          </div>
+
+          <div className="statCard">
+            <div className="statLabel">
+              今日预计收益
+            </div>
+
+            <div
+              className={
+                stats.todayEstimate >= 0
+                  ? "statValue profit"
+                  : "statValue loss"
+              }
+            >
+              {money(
+                stats.todayEstimate
+              )}
+            </div>
+
+            <div className="statHint">
+              基于基金估值
+            </div>
+          </div>
+        </section>
+
+        {/* 提示 */}
+        <div className="notice">
+          <strong>数据说明：</strong>
+          基金估值仅用于盘中参考，最终收益以基金实际公布的净值为准。
         </div>
 
-        <button
-          className="ghost"
-          onClick={() =>
-            loadQuotes(codes)
-          }
-          disabled={
-            loading ||
-            codes.length === 0
-          }
-        >
-          {loading
-            ? "刷新中..."
-            : "刷新基金数据"}
-        </button>
-      </header>
+        {/* 添加定投 */}
+        <section className="panel">
+          <div className="panelHeader">
+            <div>
+              <h2>
+                新建定投计划
+              </h2>
 
-      {/* =========================
-          资产统计
-          ========================= */}
-
-      <section className="stats">
-
-        <Stat
-          title="总资产"
-          value={money(
-            stats.value
-          )}
-        />
-
-        <Stat
-          title="累计投入"
-          value={money(
-            stats.invested
-          )}
-        />
-
-        <Stat
-          title="累计收益"
-          value={money(
-            stats.profit
-          )}
-          positive={
-            stats.profit >= 0
-          }
-        />
-
-        <Stat
-          title="总收益率"
-          value={percent(
-            stats.rate
-          )}
-          positive={
-            stats.rate >= 0
-          }
-        />
-
-        <Stat
-          title="今日预计收益"
-          value={money(
-            stats.todayEstimate
-          )}
-          positive={
-            stats.todayEstimate >= 0
-          }
-          note="盘中估值，仅供参考"
-        />
-
-      </section>
-
-      {/* =========================
-          新增定投 / 实际买入
-          ========================= */}
-
-      <section className="grid two">
-
-        {/* 新增定投 */}
-
-        <div className="panel">
-
-          <div className="panelTitle">
-            新增定投计划
+              <p>
+                设置每日、每周或每月定投
+              </p>
+            </div>
           </div>
 
-          <div className="form">
+          <div className="formGrid">
+            <label className="field">
+              <span>
+                计划名称
+              </span>
 
-            <input
-              value={code}
-              onChange={(e) =>
-                setCode(
-                  e.target.value.replace(
-                    /\D/g,
-                    ""
+              <input
+                value={planName}
+                onChange={(event) =>
+                  setPlanName(
+                    event.target.value
                   )
-                )
-              }
-              placeholder="基金代码，例如 000001"
-              maxLength={6}
-            />
+                }
+                placeholder="例如：沪深300定投"
+              />
+            </label>
 
-            <input
-              value={name}
-              onChange={(e) =>
-                setName(
-                  e.target.value
-                )
-              }
-              placeholder="计划名称"
-            />
+            <label className="field">
+              <span>
+                基金代码
+              </span>
 
-            <input
-              value={amount}
-              onChange={(e) =>
-                setAmount(
-                  e.target.value
-                )
-              }
-              type="number"
-              min="1"
-              placeholder="每次投入"
-            />
+              <input
+                value={planCode}
+                onChange={(event) =>
+                  setPlanCode(
+                    event.target.value
+                  )
+                }
+                placeholder="例如：000001"
+                inputMode="numeric"
+                maxLength={6}
+              />
+            </label>
 
-            <select
-              value={frequency}
-              onChange={(e) =>
-                setFrequency(
-                  e.target
-                    .value as Frequency
-                )
-              }
-            >
+            <label className="field">
+              <span>
+                定投金额
+              </span>
 
-              <option value="daily">
-                每日
-              </option>
+              <input
+                value={planAmount}
+                onChange={(event) =>
+                  setPlanAmount(
+                    event.target.value
+                  )
+                }
+                placeholder="100"
+                inputMode="decimal"
+              />
+            </label>
 
-              <option value="weekly">
-                每周
-              </option>
+            <label className="field">
+              <span>
+                定投频率
+              </span>
 
-              <option value="monthly">
-                每月
-              </option>
+              <select
+                value={planFrequency}
+                onChange={(event) =>
+                  setPlanFrequency(
+                    event.target.value as DcaPlan["frequency"]
+                  )
+                }
+              >
+                <option value="daily">
+                  每日
+                </option>
 
-            </select>
+                <option value="weekly">
+                  每周
+                </option>
 
-            <input
-              value={startDate}
-              onChange={(e) =>
-                setStartDate(
-                  e.target.value
-                )
-              }
-              type="date"
-            />
+                <option value="monthly">
+                  每月
+                </option>
+              </select>
+            </label>
+          </div>
 
+          <button
+            className="primaryButton"
+            onClick={addPlan}
+          >
+            添加定投计划
+          </button>
+        </section>
+
+        {/* 手动买入 */}
+        <section className="panel">
+          <div className="panelHeader">
+            <div>
+              <h2>
+                记录一次买入
+              </h2>
+
+              <p>
+                用于录入历史定投或手动加仓
+              </p>
+            </div>
+          </div>
+
+          <div className="formGrid">
+            <label className="field">
+              <span>
+                基金代码
+              </span>
+
+              <input
+                value={buyCode}
+                onChange={(event) =>
+                  setBuyCode(
+                    event.target.value
+                  )
+                }
+                placeholder="000001"
+                inputMode="numeric"
+                maxLength={6}
+              />
+            </label>
+
+            <label className="field">
+              <span>
+                基金名称
+              </span>
+
+              <input
+                value={buyName}
+                onChange={(event) =>
+                  setBuyName(
+                    event.target.value
+                  )
+                }
+                placeholder="可自动获取"
+              />
+            </label>
+
+            <label className="field">
+              <span>
+                买入金额
+              </span>
+
+              <input
+                value={buyAmount}
+                onChange={(event) =>
+                  setBuyAmount(
+                    event.target.value
+                  )
+                }
+                placeholder="100"
+                inputMode="decimal"
+              />
+            </label>
+
+            <label className="field">
+              <span>
+                买入净值
+              </span>
+
+              <input
+                value={buyNav}
+                onChange={(event) =>
+                  setBuyNav(
+                    event.target.value
+                  )
+                }
+                placeholder="例如 1.2345"
+                inputMode="decimal"
+              />
+            </label>
+          </div>
+
+          <div className="buttonRow">
             <button
-              onClick={addPlan}
+              className="secondaryButton"
+              onClick={fillBuyFromQuote}
             >
-              添加定投计划
+              获取当前净值
             </button>
 
-          </div>
-
-        </div>
-
-        {/* 实际买入 */}
-
-        <div className="panel">
-
-          <div className="panelTitle">
-            记录实际买入
-          </div>
-
-          <div className="form">
-
-            <input
-              value={buyCode}
-              onChange={(e) =>
-                setBuyCode(
-                  e.target.value.replace(
-                    /\D/g,
-                    ""
-                  )
-                )
-              }
-              placeholder="基金代码"
-              maxLength={6}
-            />
-
-            <input
-              value={buyAmount}
-              onChange={(e) =>
-                setBuyAmount(
-                  e.target.value
-                )
-              }
-              type="number"
-              min="1"
-              placeholder="投入金额"
-            />
-
-            <input
-              value={buyNav}
-              onChange={(e) =>
-                setBuyNav(
-                  e.target.value
-                )
-              }
-              type="number"
-              min="0"
-              step="0.0001"
-              placeholder="成交净值"
-            />
-
             <button
+              className="primaryButton"
               onClick={addBuy}
             >
               记录买入
             </button>
-
           </div>
+        </section>
 
-          <div className="hint">
-            每笔交易都会记录实际份额，因此收益会按照真实份额持续滚存。
-          </div>
+        {/* 定投计划 */}
+        <section className="panel">
+          <div className="panelHeader">
+            <div>
+              <h2>
+                我的定投计划
+              </h2>
 
-        </div>
-
-      </section>
-
-      {/* =========================
-          我的定投计划
-          ========================= */}
-
-      <section className="panel">
-
-        <div className="panelHead">
-
-          <div>
-
-            <div className="panelTitle">
-              我的定投计划
+              <p>
+                共 {plans.length} 个计划
+              </p>
             </div>
+          </div>
 
-            <div className="muted">
-              点击「执行本次」可以模拟一次实际定投。
+          {plans.length === 0 ? (
+            <div className="empty">
+              暂时没有定投计划
             </div>
-
-          </div>
-
-        </div>
-
-        {plans.length === 0 ? (
-
-          <div className="empty">
-            暂时没有定投计划。
-          </div>
-
-        ) : (
-
-          <div className="table">
-
-            {plans.map(
-              (plan) => {
-
+          ) : (
+            <div className="list">
+              {plans.map((plan) => {
                 const quote =
-                  quotes[
-                    plan.code
-                  ];
-
-                const list =
-                  transactions.filter(
-                    (item) =>
-                      item.planId ===
-                      plan.id
-                  );
-
-                const invested =
-                  list.reduce(
-                    (
-                      sum,
-                      item
-                    ) =>
-                      sum +
-                      item.amount +
-                      item.fee,
-                    0
-                  );
-
-                const shares =
-                  list.reduce(
-                    (
-                      sum,
-                      item
-                    ) =>
-                      sum +
-                      item.shares,
-                    0
-                  );
-
-                const nav =
-                  quote?.estimatedNav ??
-                  quote?.nav ??
-                  0;
-
-                const value =
-                  shares * nav;
-
-                const profit =
-                  value -
-                  invested;
+                  quotes[plan.code];
 
                 return (
                   <div
-                    className="row"
+                    className="listItem"
                     key={plan.id}
                   >
-
-                    <div>
-
-                      <strong>
+                    <div className="listMain">
+                      <div className="listTitle">
                         {plan.name}
-                      </strong>
+                      </div>
 
-                      <span>
-                        {plan.code} ·{" "}
+                      <div className="listMeta">
+                        {plan.code}
+                        {" · "}
                         {frequencyLabel(
                           plan.frequency
-                        )}{" "}
-                        · ¥
-                        {plan.amount}
-                      </span>
-
-                    </div>
-
-                    <div>
-
-                      <span>
-                        累计投入
-                      </span>
-
-                      <strong>
-                        {money(
-                          invested
                         )}
-                      </strong>
+                        {" · "}
+                        {money(plan.amount)}
+                      </div>
 
+                      {quote && (
+                        <div className="listMeta">
+                          {quote.name}
+                          {" · "}
+                          净值{" "}
+                          {quote.nav > 0
+                            ? quote.nav.toFixed(
+                                4
+                              )
+                            : "--"}
+                        </div>
+                      )}
                     </div>
 
-                    <div>
-
-                      <span>
-                        当前市值
-                      </span>
-
-                      <strong>
-                        {money(
-                          value
-                        )}
-                      </strong>
-
-                    </div>
-
-                    <div>
-
-                      <span>
-                        收益
-                      </span>
-
-                      <strong
-                        className={
-                          profit >= 0
-                            ? "up"
-                            : "down"
-                        }
-                      >
-                        {money(
-                          profit
-                        )}
-                      </strong>
-
-                    </div>
-
-                    <div className="actions">
-
+                    <div className="listActions">
                       <button
+                        className="primaryButton small"
                         onClick={() =>
-                          addEstimatedTransaction(
-                            plan
-                          )
+                          executePlan(plan)
                         }
                       >
                         执行本次
                       </button>
 
                       <button
-                        className="danger"
+                        className="dangerButton"
                         onClick={() =>
-                          deletePlan(
-                            plan.id
-                          )
+                          deletePlan(plan.id)
                         }
                       >
                         删除
                       </button>
-
                     </div>
-
                   </div>
                 );
-              }
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* 基金实时数据 */}
+        <section className="panel">
+          <div className="panelHeader">
+            <div>
+              <h2>
+                基金实时数据
+              </h2>
+
+              <p>
+                来自天天基金公开估值接口
+              </p>
+            </div>
+
+            {loading && (
+              <span className="loading">
+                正在获取...
+              </span>
             )}
-
           </div>
 
-        )}
-
-      </section>
-
-      {/* =========================
-          我的基金
-          ========================= */}
-
-      <section className="panel">
-
-        <div className="panelHead">
-
-          <div>
-
-            <div className="panelTitle">
-              我的基金
+          {codes.length === 0 ? (
+            <div className="empty">
+              添加基金后，这里会自动显示数据。
             </div>
-
-            <div className="muted">
-              实时估值来自公开基金估值接口。
-            </div>
-
-          </div>
-
-        </div>
-
-        {codes.length === 0 ? (
-
-          <div className="empty">
-            添加基金后显示数据。
-          </div>
-
-        ) : (
-
-          <div className="quoteGrid">
-
-            {codes.map(
-              (fundCode) => {
-
+          ) : (
+            <div className="quoteGrid">
+              {codes.map((code) => {
                 const quote =
-                  quotes[
-                    fundCode
-                  ];
+                  quotes[code];
 
-                /**
-                 * quote 还没加载完成时，
-                 * 所有字段都安全处理。
-                 */
+                if (!quote) {
+                  return (
+                    <div
+                      className="quoteCard"
+                      key={code}
+                    >
+                      <div className="quoteCode">
+                        {code}
+                      </div>
 
-                const displayNav =
-                  quote?.estimatedNav ??
-                  quote?.nav ??
-                  null;
+                      <div className="quoteName">
+                        正在获取数据...
+                      </div>
 
-                const changePct =
-                  quote?.estimatedChangePct;
+                      <div className="quoteBig">
+                        --
+                      </div>
+                    </div>
+                  );
+                }
+
+                const change =
+                  quote.estimatedChangePct;
+
+                const positive =
+                  change !== null &&
+                  change >= 0;
 
                 return (
                   <div
-                    className="quote"
-                    key={fundCode}
+                    className="quoteCard"
+                    key={code}
                   >
+                    <div className="quoteTop">
+                      <div>
+                        <div className="quoteCode">
+                          {quote.code}
+                        </div>
 
-                    <strong>
-                      {quote?.name ||
-                        `基金 ${fundCode}`}
-                    </strong>
+                        <div className="quoteName">
+                          {quote.name}
+                        </div>
+                      </div>
 
-                    <span>
-                      {fundCode}
-                    </span>
+                      <span
+                        className={
+                          change === null
+                            ? "badge"
+                            : positive
+                            ? "badge positive"
+                            : "badge negative"
+                        }
+                      >
+                        {change === null
+                          ? "暂无估值"
+                          : `${change >= 0 ? "+" : ""}${change.toFixed(
+                              2
+                            )}%`}
+                      </span>
+                    </div>
 
-                    <b>
-                      {displayNav !==
-                        null &&
-                      Number.isFinite(
-                        displayNav
-                      )
-                        ? displayNav.toFixed(
+                    <div className="quoteBig">
+                      {quote.estimatedNav !==
+                      null
+                        ? quote.estimatedNav.toFixed(
                             4
                           )
-                        : "加载中"}
-                    </b>
+                        : quote.nav > 0
+                        ? quote.nav.toFixed(
+                            4
+                          )
+                        : "--"}
+                    </div>
 
-                    <em
-                      className={
-                        (
-                          changePct ??
-                          0
-                        ) >= 0
-                          ? "up"
-                          : "down"
-                      }
-                    >
-                      {changePct ==
-                      null
-                        ? "暂无估值"
-                        : `${
-                            changePct >=
-                            0
-                              ? "+"
-                              : ""
-                          }${changePct.toFixed(
-                            2
-                          )}%`}
-                    </em>
+                    <div className="quoteDetails">
+                      <span>
+                        最新净值{" "}
+                        {quote.nav > 0
+                          ? quote.nav.toFixed(
+                              4
+                            )
+                          : "--"}
+                      </span>
 
-                    <small>
-                      净值日期：
-                      {quote?.navDate ||
-                        "--"}
-                    </small>
+                      <span>
+                        净值日期{" "}
+                        {quote.navDate ||
+                          "--"}
+                      </span>
+                    </div>
 
-                    {quote?.estimatedAt && (
-                      <small>
-                        估值时间：
-                        {
-                          quote.estimatedAt
-                        }
-                      </small>
+                    {quote.estimatedAt && (
+                      <div className="quoteTime">
+                        估值时间{" "}
+                        {quote.estimatedAt}
+                      </div>
                     )}
-
                   </div>
                 );
-              }
-            )}
-
-          </div>
-
-        )}
-
-      </section>
-
-      {/* =========================
-          资产走势
-          ========================= */}
-
-      <section className="panel">
-
-        <div className="panelHead">
-
-          <div>
-
-            <div className="panelTitle">
-              资产走势
+              })}
             </div>
+          )}
+        </section>
 
-            <div className="muted">
-              根据交易记录计算
+        {/* 持仓 */}
+        <section className="panel">
+          <div className="panelHeader">
+            <div>
+              <h2>
+                交易记录
+              </h2>
+
+              <p>
+                共 {transactions.length} 笔
+              </p>
             </div>
-
           </div>
 
-        </div>
+          {transactions.length === 0 ? (
+            <div className="empty">
+              暂时没有交易记录
+            </div>
+          ) : (
+            <div className="tableWrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>
+                      日期
+                    </th>
 
-        {snapshots.length <
-        2 ? (
+                    <th>
+                      基金
+                    </th>
 
-          <div className="empty">
-            记录至少两次交易后显示资产走势。
+                    <th>
+                      买入金额
+                    </th>
+
+                    <th>
+                      净值
+                    </th>
+
+                    <th>
+                      份额
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {transactions
+                    .slice()
+                    .reverse()
+                    .map(
+                      (
+                        transaction
+                      ) => (
+                        <tr
+                          key={
+                            transaction.id
+                          }
+                        >
+                          <td>
+                            {
+                              transaction.date
+                            }
+                          </td>
+
+                          <td>
+                            <strong>
+                              {
+                                transaction.code
+                              }
+                            </strong>
+
+                            <div className="tableSub">
+                              {
+                                transaction.name
+                              }
+                            </div>
+                          </td>
+
+                          <td>
+                            {money(
+                              transaction.amount
+                            )}
+                          </td>
+
+                          <td>
+                            {transaction.nav.toFixed(
+                              4
+                            )}
+                          </td>
+
+                          <td>
+                            {transaction.shares.toFixed(
+                              4
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* 收益图 */}
+        <section className="panel">
+          <div className="panelHeader">
+            <div>
+              <h2>
+                资产变化
+              </h2>
+
+              <p>
+                根据已录入交易记录计算
+              </p>
+            </div>
           </div>
 
-        ) : (
-
-          <div className="bars">
-
-            {snapshots
-              .slice(-30)
-              .map(
-                (
-                  snapshot,
-                  index
-                ) => {
-
-                  const max =
+          {snapshots.length < 1 ? (
+            <div className="empty">
+              有交易记录后，这里会显示资产变化。
+            </div>
+          ) : (
+            <div className="chart">
+              {snapshots.map(
+                (snapshot) => {
+                  const maxValue =
                     Math.max(
                       ...snapshots.map(
                         (item) =>
@@ -1295,138 +1242,79 @@ export default function Dashboard() {
 
                   const height =
                     Math.max(
-                      4,
+                      8,
                       (snapshot.value /
-                        max) *
+                        maxValue) *
                         100
                     );
 
                   return (
                     <div
-                      className="barWrap"
-                      key={`${snapshot.date}-${index}`}
-                      title={`${snapshot.date} ${money(
-                        snapshot.value
-                      )}`}
+                      className="chartColumn"
+                      key={
+                        snapshot.date
+                      }
                     >
-
-                      <div
-                        className="bar"
-                        style={{
-                          height: `${height}%`,
-                        }}
-                      />
-
-                      <small>
-                        {snapshot.date.slice(
-                          5
+                      <div className="chartValue">
+                        {money(
+                          snapshot.value
                         )}
-                      </small>
+                      </div>
 
+                      <div className="chartTrack">
+                        <div
+                          className="chartBar"
+                          style={{
+                            height: `${height}%`,
+                          }}
+                        />
+                      </div>
+
+                      <div className="chartDate">
+                        {
+                          snapshot.date
+                        }
+                      </div>
                     </div>
                   );
                 }
               )}
-
-          </div>
-
-        )}
-
-      </section>
-
-      {/* =========================
-          数据管理
-          ========================= */}
-
-      <section className="panel dangerPanel">
-
-        <div className="panelHead">
-
-          <div>
-
-            <div className="panelTitle">
-              数据管理
             </div>
+          )}
+        </section>
 
-            <div className="muted">
-              当前数据保存在本浏览器中。
+        {/* 数据管理 */}
+        <section className="panel dangerPanel">
+          <div className="panelHeader">
+            <div>
+              <h2>
+                数据管理
+              </h2>
+
+              <p>
+                数据目前保存在浏览器本地
+              </p>
             </div>
-
           </div>
 
           <button
-            className="danger"
-            onClick={
-              clearAll
-            }
+            className="dangerButton"
+            onClick={clearAll}
           >
-            清空全部数据
+            清空所有本地数据
           </button>
+        </section>
 
-        </div>
+        <footer className="footer">
+          <div>
+            基金定投助手
+          </div>
 
-      </section>
-
-      {/* =========================
-          页脚
-          ========================= */}
-
-      <footer>
-
-        <span>
-          基金定投助手 v1.0
-        </span>
-
-        <span>
-          数据仅供记录与分析，不构成投资建议
-        </span>
-
-      </footer>
-
+          <div>
+            基金估值仅供参考，实际净值以基金公司最终公布数据为准。
+          </div>
+        </footer>
+      </div>
     </main>
-  );
-}
-
-/* =========================
-   统计卡片
-   ========================= */
-
-function Stat({
-  title,
-  value,
-  positive,
-  note,
-}: {
-  title: string;
-  value: string;
-  positive?: boolean;
-  note?: string;
-}) {
-  return (
-    <div className="card">
-
-      <span>
-        {title}
-      </span>
-
-      <strong
-        className={
-          positive === undefined
-            ? ""
-            : positive
-              ? "up"
-              : "down"
-        }
-      >
-        {value}
-      </strong>
-
-      {note && (
-        <small>
-          {note}
-        </small>
-      )}
-
-    </div>
   );
 }
