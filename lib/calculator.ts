@@ -5,92 +5,71 @@ import {
   Transaction,
 } from "./types";
 
-export function money(n: number) {
-  return new Intl.NumberFormat(
-    "zh-CN",
-    {
-      style: "currency",
-      currency: "CNY",
-      maximumFractionDigits: 2,
-    }
-  ).format(
-    Number.isFinite(n) ? n : 0
-  );
+export function money(value: number) {
+  return new Intl.NumberFormat("zh-CN", {
+    style: "currency",
+    currency: "CNY",
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(value) ? value : 0);
 }
 
-export function pct(n: number) {
-  return `${(
-    Number.isFinite(n) ? n : 0
-  ).toFixed(2)}%`;
+export function percent(value: number) {
+  return `${Number.isFinite(value) ? value.toFixed(2) : "0.00"}%`;
 }
 
 export function portfolioStats(
   transactions: Transaction[],
-  quotes: Record<
-    string,
-    FundQuote
-  >
+  quotes: Record<string, FundQuote>
 ) {
-  const invested =
-    transactions.reduce(
-      (sum, transaction) =>
+  const invested = transactions.reduce(
+    (sum, item) => sum + item.amount + item.fee,
+    0
+  );
+
+  const value = transactions.reduce((sum, item) => {
+    const quote = quotes[item.code];
+
+    const nav =
+      quote?.estimatedNav ??
+      quote?.nav ??
+      item.nav;
+
+    return sum + item.shares * nav;
+  }, 0);
+
+  const profit = value - invested;
+
+  const rate =
+    invested > 0
+      ? (profit / invested) * 100
+      : 0;
+
+  const todayEstimate = transactions.reduce(
+    (sum, item) => {
+      const quote = quotes[item.code];
+
+      if (
+        !quote ||
+        quote.estimatedChangePct === null
+      ) {
+        return sum;
+      }
+
+      const nav =
+        quote.estimatedNav ??
+        quote.nav ??
+        item.nav;
+
+      return (
         sum +
-        transaction.amount +
-        transaction.fee,
-      0
-    );
-
-  const value =
-    transactions.reduce(
-      (sum, transaction) => {
-        const quote =
-          quotes[transaction.code];
-
-        const nav =
-          quote?.estimatedNav ??
-          quote?.nav ??
-          transaction.nav;
-
-        return (
-          sum +
-          transaction.shares *
-            nav
-        );
-      },
-      0
-    );
-
-  const profit =
-    value - invested;
-
-  const rate = invested
-    ? (profit / invested) * 100
-    : 0;
-
-  const todayEstimate =
-    transactions.reduce(
-      (sum, transaction) => {
-        const quote =
-          quotes[transaction.code];
-
-        const change =
-          quote?.estimatedChangePct ??
-          0;
-
-        const nav =
-          quote?.nav ??
-          transaction.nav;
-
-        return (
-          sum +
-          (transaction.shares *
-            nav *
-            change) /
-            100
-        );
-      },
-      0
-    );
+        item.shares *
+          nav *
+          quote.estimatedChangePct /
+          100
+      );
+    },
+    0
+  );
 
   return {
     invested,
@@ -101,7 +80,7 @@ export function portfolioStats(
   };
 }
 
-export function addTransactionFromAmount(
+export function createTransaction(
   code: string,
   name: string,
   date: string,
@@ -110,16 +89,12 @@ export function addTransactionFromAmount(
   planId?: string,
   fee = 0
 ): Transaction {
-  if (!amount || amount <= 0) {
-    throw new Error(
-      "投入金额必须大于 0"
-    );
+  if (amount <= 0) {
+    throw new Error("投入金额必须大于 0");
   }
 
-  if (!nav || nav <= 0) {
-    throw new Error(
-      "净值必须大于 0"
-    );
+  if (nav <= 0) {
+    throw new Error("净值必须大于 0");
   }
 
   return {
@@ -135,130 +110,63 @@ export function addTransactionFromAmount(
   };
 }
 
-export function dueDates(
-  plan: DcaPlan,
-  until = new Date()
-) {
-  const result: string[] = [];
-
-  const start = new Date(
-    `${plan.startDate}T00:00:00`
-  );
-
-  const end = new Date(until);
-
-  if (start > end) {
-    return result;
-  }
-
-  for (
-    let date = new Date(start);
-    date <= end;
-    date.setDate(
-      date.getDate() + 1
-    )
-  ) {
-    const weekday =
-      date.getDay();
-
-    let due = false;
-
-    if (
-      plan.frequency ===
-      "daily"
-    ) {
-      due =
-        weekday !== 0 &&
-        weekday !== 6;
-    }
-
-    if (
-      plan.frequency ===
-      "weekly"
-    ) {
-      due =
-        weekday ===
-        start.getDay();
-    }
-
-    if (
-      plan.frequency ===
-      "monthly"
-    ) {
-      due =
-        date.getDate() ===
-        start.getDate();
-    }
-
-    if (due) {
-      result.push(
-        date
-          .toISOString()
-          .slice(0, 10)
-      );
-    }
-  }
-
-  return result;
-}
-
 export function buildSnapshots(
   transactions: Transaction[],
-  quotes: Record<
-    string,
-    FundQuote
-  >
+  quotes: Record<string, FundQuote>
 ): Snapshot[] {
   const dates = Array.from(
     new Set(
       transactions.map(
-        (transaction) =>
-          transaction.date
+        (item) => item.date
       )
     )
   ).sort();
 
   return dates.map((date) => {
-    const transactionsAtDate =
-      transactions.filter(
-        (transaction) =>
-          transaction.date <= date
-      );
+    const list = transactions.filter(
+      (item) => item.date <= date
+    );
 
-    const invested =
-      transactionsAtDate.reduce(
-        (sum, transaction) =>
+    const invested = list.reduce(
+      (sum, item) =>
+        sum + item.amount + item.fee,
+      0
+    );
+
+    const value = list.reduce(
+      (sum, item) => {
+        const quote = quotes[item.code];
+
+        const nav =
+          quote?.nav ??
+          item.nav;
+
+        return (
           sum +
-          transaction.amount +
-          transaction.fee,
-        0
-      );
-
-    const value =
-      transactionsAtDate.reduce(
-        (sum, transaction) => {
-          const quote =
-            quotes[
-              transaction.code
-            ];
-
-          const nav =
-            quote?.nav ??
-            transaction.nav;
-
-          return (
-            sum +
-            transaction.shares *
-              nav
-          );
-        },
-        0
-      );
+          item.shares * nav
+        );
+      },
+      0
+    );
 
     return {
       date,
-      value,
       invested,
+      value,
     };
   });
+}
+
+export function frequencyLabel(
+  frequency: DcaPlan["frequency"]
+) {
+  if (frequency === "daily") {
+    return "每日";
+  }
+
+  if (frequency === "weekly") {
+    return "每周";
+  }
+
+  return "每月";
 }
