@@ -27,10 +27,6 @@ const STORAGE =
 
 type JsonpData = Record<string, string | undefined>;
 
-type WindowWithCallbacks = Window & {
-  [key: string]: unknown;
-};
-
 function today() {
   return new Date()
     .toISOString()
@@ -38,9 +34,9 @@ function today() {
 }
 
 /**
- * 生成一个兼容性更好的唯一 ID。
+ * 生成唯一 ID。
  * 优先使用 crypto.randomUUID，
- * 如果浏览器不支持，则使用时间戳 + 随机数。
+ * 不支持时使用时间戳 + 随机字符串。
  */
 function createId() {
   try {
@@ -62,9 +58,8 @@ function createId() {
 /**
  * 安全转换数字。
  *
- * 注意：
- * 不能使用 Number(value) || null，
- * 因为 0 会被错误地变成 null。
+ * 不使用 Number(value) || null，
+ * 因为 0 会被错误转换成 null。
  */
 function toNumberOrNull(
   value: string | undefined
@@ -123,9 +118,10 @@ export default function Dashboard() {
   const [buyNav, setBuyNav] =
     useState("");
 
-  /**
-   * 页面第一次加载时读取本地数据。
-   */
+  /* =========================
+     读取本地数据
+     ========================= */
+
   useEffect(() => {
     try {
       const saved =
@@ -157,9 +153,10 @@ export default function Dashboard() {
     }
   }, []);
 
-  /**
-   * 数据变化后自动保存到浏览器。
-   */
+  /* =========================
+     自动保存本地数据
+     ========================= */
+
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -179,9 +176,10 @@ export default function Dashboard() {
     transactions,
   ]);
 
-  /**
-   * 当前所有涉及的基金代码。
-   */
+  /* =========================
+     获取基金代码
+     ========================= */
+
   const codes = useMemo(() => {
     return Array.from(
       new Set([
@@ -198,24 +196,25 @@ export default function Dashboard() {
     transactions,
   ]);
 
-  /**
-   * 基金代码变化时自动加载行情。
-   */
+  /* =========================
+     基金代码变化时自动刷新
+     ========================= */
+
   useEffect(() => {
     if (!codes.length) {
       return;
     }
 
     loadQuotes(codes);
+
+    // codes.join(",") 用来避免数组引用变化造成重复请求
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [codes.join(",")]);
 
-  /**
-   * 使用公开基金估值接口获取行情。
-   *
-   * 这里使用 JSONP，是因为 GitHub Pages 是纯静态网站，
-   * 浏览器无法直接运行 Next.js server API。
-   */
+  /* =========================
+     加载基金行情
+     ========================= */
+
   function loadQuotes(
     fundCodes: string[]
   ) {
@@ -227,9 +226,6 @@ export default function Dashboard() {
 
     let completed = 0;
     let finished = false;
-
-    const scripts: HTMLScriptElement[] =
-      [];
 
     const finishOne = () => {
       completed += 1;
@@ -255,13 +251,15 @@ export default function Dashboard() {
             "script"
           );
 
-        scripts.push(script);
-
         let timeoutId:
           | ReturnType<typeof setTimeout>
           | undefined;
 
         let handled = false;
+
+        /* -------------------------
+           清理 JSONP
+           ------------------------- */
 
         const cleanup = () => {
           if (timeoutId) {
@@ -271,13 +269,29 @@ export default function Dashboard() {
           script.remove();
 
           try {
-            delete (
-              window as WindowWithCallbacks
-            )[callback];
+            /**
+             * 这里使用 unknown 双重转换，
+             * 避免 TypeScript 报：
+             *
+             * Conversion of type 'Window'
+             * to type 'WindowWithCallbacks'
+             * may be a mistake
+             */
+            const win =
+              window as unknown as Record<
+                string,
+                unknown
+              >;
+
+            delete win[callback];
           } catch {
             // ignore
           }
         };
+
+        /* -------------------------
+           完成一次请求
+           ------------------------- */
 
         const handleFinish = () => {
           if (handled) {
@@ -285,13 +299,23 @@ export default function Dashboard() {
           }
 
           handled = true;
+
           cleanup();
+
           finishOne();
         };
 
-        (
-          window as WindowWithCallbacks
-        )[callback] = (
+        /* -------------------------
+           JSONP 回调
+           ------------------------- */
+
+        const win =
+          window as unknown as Record<
+            string,
+            unknown
+          >;
+
+        win[callback] = (
           data: JsonpData
         ) => {
           if (handled) {
@@ -348,23 +372,31 @@ export default function Dashboard() {
           handleFinish();
         };
 
+        /* -------------------------
+           JSONP 地址
+           ------------------------- */
+
         script.src =
           `https://fundgz.1234567.com.cn/js/${fundCode}.js?rt=${Date.now()}&callback=${callback}`;
 
         script.async = true;
 
+        /* -------------------------
+           请求失败
+           ------------------------- */
+
         script.onerror = () => {
           handleFinish();
         };
 
-        /**
-         * 8 秒超时。
-         * 防止某个基金接口没有响应导致整个页面
-         * 永远停留在“刷新中”。
-         */
-        timeoutId = setTimeout(() => {
-          handleFinish();
-        }, 8000);
+        /* -------------------------
+           8 秒超时
+           ------------------------- */
+
+        timeoutId =
+          setTimeout(() => {
+            handleFinish();
+          }, 8000);
 
         document.body.appendChild(
           script
@@ -373,27 +405,30 @@ export default function Dashboard() {
     );
   }
 
-  /**
-   * 计算组合数据。
-   */
+  /* =========================
+     资产统计
+     ========================= */
+
   const stats =
     portfolioStats(
       transactions,
       quotes
     );
 
-  /**
-   * 计算资产走势。
-   */
+  /* =========================
+     资产走势
+     ========================= */
+
   const snapshots =
     buildSnapshots(
       transactions,
       quotes
     );
 
-  /**
-   * 添加定投计划。
-   */
+  /* =========================
+     新增定投计划
+     ========================= */
+
   function addPlan() {
     const normalizedCode =
       code.trim();
@@ -462,9 +497,10 @@ export default function Dashboard() {
     setName("");
   }
 
-  /**
-   * 手动记录一次实际买入。
-   */
+  /* =========================
+     记录实际买入
+     ========================= */
+
   function addBuy() {
     const normalizedCode =
       buyCode.trim();
@@ -532,9 +568,10 @@ export default function Dashboard() {
     setBuyNav("");
   }
 
-  /**
-   * 按当前估值执行一次定投。
-   */
+  /* =========================
+     执行一次定投
+     ========================= */
+
   function addEstimatedTransaction(
     plan: DcaPlan
   ) {
@@ -586,11 +623,10 @@ export default function Dashboard() {
     );
   }
 
-  /**
-   * 删除定投计划。
-   *
-   * 注意：只删除计划，不删除历史交易。
-   */
+  /* =========================
+     删除定投计划
+     ========================= */
+
   function deletePlan(
     id: string
   ) {
@@ -611,9 +647,10 @@ export default function Dashboard() {
     );
   }
 
-  /**
-   * 清空所有本地数据。
-   */
+  /* =========================
+     清空数据
+     ========================= */
+
   function clearAll() {
     if (
       !confirm(
@@ -638,6 +675,11 @@ export default function Dashboard() {
 
   return (
     <main className="page">
+
+      {/* =========================
+          顶部
+          ========================= */}
+
       <header className="topbar">
         <div>
           <div className="eyebrow">
@@ -669,9 +711,12 @@ export default function Dashboard() {
         </button>
       </header>
 
-      {/* ==================== 资产统计 ==================== */}
+      {/* =========================
+          资产统计
+          ========================= */}
 
       <section className="stats">
+
         <Stat
           title="总资产"
           value={money(
@@ -716,19 +761,25 @@ export default function Dashboard() {
           }
           note="盘中估值，仅供参考"
         />
+
       </section>
 
-      {/* ==================== 新增区域 ==================== */}
+      {/* =========================
+          新增定投 / 实际买入
+          ========================= */}
 
       <section className="grid two">
-        {/* 新增定投计划 */}
+
+        {/* 新增定投 */}
 
         <div className="panel">
+
           <div className="panelTitle">
             新增定投计划
           </div>
 
           <div className="form">
+
             <input
               value={code}
               onChange={(e) =>
@@ -774,6 +825,7 @@ export default function Dashboard() {
                 )
               }
             >
+
               <option value="daily">
                 每日
               </option>
@@ -785,6 +837,7 @@ export default function Dashboard() {
               <option value="monthly">
                 每月
               </option>
+
             </select>
 
             <input
@@ -802,17 +855,21 @@ export default function Dashboard() {
             >
               添加定投计划
             </button>
+
           </div>
+
         </div>
 
-        {/* 记录实际买入 */}
+        {/* 实际买入 */}
 
         <div className="panel">
+
           <div className="panelTitle">
             记录实际买入
           </div>
 
           <div className="form">
+
             <input
               value={buyCode}
               onChange={(e) =>
@@ -857,19 +914,27 @@ export default function Dashboard() {
             >
               记录买入
             </button>
+
           </div>
 
           <div className="hint">
             每笔交易都会记录实际份额，因此收益会按照真实份额持续滚存。
           </div>
+
         </div>
+
       </section>
 
-      {/* ==================== 定投计划 ==================== */}
+      {/* =========================
+          我的定投计划
+          ========================= */}
 
       <section className="panel">
+
         <div className="panelHead">
+
           <div>
+
             <div className="panelTitle">
               我的定投计划
             </div>
@@ -877,17 +942,24 @@ export default function Dashboard() {
             <div className="muted">
               点击「执行本次」可以模拟一次实际定投。
             </div>
+
           </div>
+
         </div>
 
         {plans.length === 0 ? (
+
           <div className="empty">
             暂时没有定投计划。
           </div>
+
         ) : (
+
           <div className="table">
+
             {plans.map(
               (plan) => {
+
                 const quote =
                   quotes[
                     plan.code
@@ -940,7 +1012,9 @@ export default function Dashboard() {
                     className="row"
                     key={plan.id}
                   >
+
                     <div>
+
                       <strong>
                         {plan.name}
                       </strong>
@@ -953,9 +1027,11 @@ export default function Dashboard() {
                         · ¥
                         {plan.amount}
                       </span>
+
                     </div>
 
                     <div>
+
                       <span>
                         累计投入
                       </span>
@@ -965,9 +1041,11 @@ export default function Dashboard() {
                           invested
                         )}
                       </strong>
+
                     </div>
 
                     <div>
+
                       <span>
                         当前市值
                       </span>
@@ -977,9 +1055,11 @@ export default function Dashboard() {
                           value
                         )}
                       </strong>
+
                     </div>
 
                     <div>
+
                       <span>
                         收益
                       </span>
@@ -995,9 +1075,11 @@ export default function Dashboard() {
                           profit
                         )}
                       </strong>
+
                     </div>
 
                     <div className="actions">
+
                       <button
                         onClick={() =>
                           addEstimatedTransaction(
@@ -1018,20 +1100,30 @@ export default function Dashboard() {
                       >
                         删除
                       </button>
+
                     </div>
+
                   </div>
                 );
               }
             )}
+
           </div>
+
         )}
+
       </section>
 
-      {/* ==================== 基金行情 ==================== */}
+      {/* =========================
+          我的基金
+          ========================= */}
 
       <section className="panel">
+
         <div className="panelHead">
+
           <div>
+
             <div className="panelTitle">
               我的基金
             </div>
@@ -1039,27 +1131,32 @@ export default function Dashboard() {
             <div className="muted">
               实时估值来自公开基金估值接口。
             </div>
+
           </div>
+
         </div>
 
         {codes.length === 0 ? (
+
           <div className="empty">
             添加基金后显示数据。
           </div>
+
         ) : (
+
           <div className="quoteGrid">
+
             {codes.map(
               (fundCode) => {
+
                 const quote =
                   quotes[
                     fundCode
                   ];
 
                 /**
-                 * quote 可能还没有加载完成。
-                 *
-                 * 所有字段都使用 ?. 或 ??，
-                 * 防止 undefined 导致页面崩溃。
+                 * quote 还没加载完成时，
+                 * 所有字段都安全处理。
                  */
 
                 const displayNav =
@@ -1075,6 +1172,7 @@ export default function Dashboard() {
                     className="quote"
                     key={fundCode}
                   >
+
                     <strong>
                       {quote?.name ||
                         `基金 ${fundCode}`}
@@ -1133,19 +1231,28 @@ export default function Dashboard() {
                         }
                       </small>
                     )}
+
                   </div>
                 );
               }
             )}
+
           </div>
+
         )}
+
       </section>
 
-      {/* ==================== 资产走势 ==================== */}
+      {/* =========================
+          资产走势
+          ========================= */}
 
       <section className="panel">
+
         <div className="panelHead">
+
           <div>
+
             <div className="panelTitle">
               资产走势
             </div>
@@ -1153,16 +1260,22 @@ export default function Dashboard() {
             <div className="muted">
               根据交易记录计算
             </div>
+
           </div>
+
         </div>
 
         {snapshots.length <
         2 ? (
+
           <div className="empty">
             记录至少两次交易后显示资产走势。
           </div>
+
         ) : (
+
           <div className="bars">
+
             {snapshots
               .slice(-30)
               .map(
@@ -1170,6 +1283,7 @@ export default function Dashboard() {
                   snapshot,
                   index
                 ) => {
+
                   const max =
                     Math.max(
                       ...snapshots.map(
@@ -1195,6 +1309,7 @@ export default function Dashboard() {
                         snapshot.value
                       )}`}
                     >
+
                       <div
                         className="bar"
                         style={{
@@ -1207,19 +1322,28 @@ export default function Dashboard() {
                           5
                         )}
                       </small>
+
                     </div>
                   );
                 }
               )}
+
           </div>
+
         )}
+
       </section>
 
-      {/* ==================== 数据管理 ==================== */}
+      {/* =========================
+          数据管理
+          ========================= */}
 
       <section className="panel dangerPanel">
+
         <div className="panelHead">
+
           <div>
+
             <div className="panelTitle">
               数据管理
             </div>
@@ -1227,6 +1351,7 @@ export default function Dashboard() {
             <div className="muted">
               当前数据保存在本浏览器中。
             </div>
+
           </div>
 
           <button
@@ -1237,10 +1362,17 @@ export default function Dashboard() {
           >
             清空全部数据
           </button>
+
         </div>
+
       </section>
 
+      {/* =========================
+          页脚
+          ========================= */}
+
       <footer>
+
         <span>
           基金定投助手 v1.0
         </span>
@@ -1248,12 +1380,16 @@ export default function Dashboard() {
         <span>
           数据仅供记录与分析，不构成投资建议
         </span>
+
       </footer>
+
     </main>
   );
 }
 
-/* ==================== 统计卡片 ==================== */
+/* =========================
+   统计卡片
+   ========================= */
 
 function Stat({
   title,
@@ -1268,6 +1404,7 @@ function Stat({
 }) {
   return (
     <div className="card">
+
       <span>
         {title}
       </span>
@@ -1289,6 +1426,7 @@ function Stat({
           {note}
         </small>
       )}
+
     </div>
   );
 }
